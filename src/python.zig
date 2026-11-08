@@ -7,7 +7,7 @@ const python_3_14 = @import("3_14");
 
 const SymbolLookup = @import("./symbol_lookup.zig");
 const ProcessMemory = @import("./process_memory.zig");
-const ProcMaps = @import("./procmaps.zig");
+   const ProcMaps = @import("./procmaps.zig");
 
 const DebugOffsetsHeader = extern struct {
     cookie: [8]u8,
