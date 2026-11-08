@@ -1,0 +1,45 @@
+"""Build file for the translate-c repository.
+Taken from https://github.com/hermeticbuild/rules_zig/blob/d6920481efa01070e4e00e4aa94af0be03462fbb/e2e/workspace/third_party/translate-c/translate-c.bazel Apache 2.0 License
+"""
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+write_file(
+    name = "build_options_zig",
+    out = "build_options.zig",
+    content = ["""\
+pub const debug_allocations: bool = false;
+"""],
+)
+
+zig_library(
+    name = "build_options",
+    main = ":build_options_zig",
+)
+
+zig_library(
+    name = "c_builtins",
+    main = "lib/c_builtins.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
+    name = "helpers",
+    main = "lib/helpers.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "translate-c",
+    data = glob(["lib/**/*.zig"]),
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":build_options",
+        ":c_builtins",
+        ":helpers",
+        "@arocc//:aro",
+    ],
+)

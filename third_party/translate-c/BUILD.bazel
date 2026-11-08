@@ -1,0 +1,19 @@
+# Taken from https://github.com/hermeticbuild/rules_zig/blob/d6920481efa01070e4e00e4aa94af0be03462fbb/e2e/workspace/third_party/translate-c/BUILD.bazel Apache 2.0 License
+load("@rules_zig//zig/translate-c:toolchain.bzl", "translate_c_toolchain")
+
+translate_c_toolchain(
+    name = "toolchain_impl",
+    runtime_modules = [
+        "@translate-c//:c_builtins",
+        "@translate-c//:helpers",
+    ],
+    translate_c = "@translate-c//:translate-c",
+)
+
+toolchain(
+    name = "toolchain",
+    target_settings = ["@rules_zig//zig/config/use_standalone_translate_c:enabled"],
+    toolchain = ":toolchain_impl",
+    toolchain_type = "@rules_zig//zig/translate-c:toolchain_type",
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,76 @@
+bazel_dep(name = "rules_zig", version = "0.17.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "rules_cc", version = "0.2.26")
+bazel_dep(name = "rules_python", version = "2.4.3")
+bazel_dep(name = "llvm", version = "0.8.24")
+bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
+
+bazel_dep(
+    name = "buildifier_prebuilt",
+    version = "6.3.3",
+    dev_dependency = True,
+)
+
+register_toolchains("@llvm//toolchain:all")
+
+single_version_override(
+    module_name = "rules_zig",
+    patch_strip = 1,
+    patches = ["//third_party/rules_zig:builtin_directories.patch"],
+    version = "0.17.0",
+)
+
+single_version_override(
+    module_name = "aspect_rules_lint",
+    patch_strip = 1,
+    patches = ["//third_party/aspect_rules_lint:zig.patch"],
+    version = "2.9.1",
+)
+
+zig = use_extension(
+    "@rules_zig//zig:extensions.bzl",
+    "zig",
+    dev_dependency = True,
+)
+zig.toolchain(zig_version = "0.17.0")
+use_repo(zig, "zig_toolchains")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "arocc",
+    build_file = "//third_party/arocc:arocc.bazel",
+    sha256 = "42f5ac4d1fb7c55ad4073dc462b02d485ace4da6d7fc29b35acfa99e28f2cb7d",
+    strip_prefix = "arocc",
+    url = "https://codeberg.org/ziglang/arocc/archive/d0c8c4d9c55daa7ef6e40cf0f630a5b5e900989b.tar.gz",
+)
+
+http_archive(
+    name = "translate-c",
+    build_file = "//third_party/translate-c:translate-c.bazel",
+    patches = ["//third_party/translate-c:bitfields.patch"],
+    sha256 = "e40b617ead55c19c638e8223d4c67702cdd32f764a7b5c1c1bdadf75468d5bc9",
+    strip_prefix = "translate-c",
+    url = "https://codeberg.org/ziglang/translate-c/archive/38d8339d9050eafe5dcf85b4fc9368576ca967e1.tar.gz",
+)
+
+register_toolchains("//third_party/translate-c:toolchain")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    configure_coverage_tool = True,
+    python_version = "3.15",
+)
+python.toolchain(
+    configure_coverage_tool = True,
+    python_version = "3.14",
+)
+python.toolchain(
+    python_version = "3.13",
+)
+use_repo(
+    python,
+    "python_3_13",
+    "python_3_14",
+    "python_3_15",
+)

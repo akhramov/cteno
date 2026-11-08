@@ -1,0 +1,418 @@
+From 3c53f665e11aaf69a8de69e3a4059b4a0508c28c Mon Sep 17 00:00:00 2001
+From: Artem Khramov <akhramov@pm.me>
+Date: Sat, 3 Oct 2026 09:14:15 +0200
+Subject: [PATCH] Rebase
+ https://codeberg.org/ziglang/translate-c/pulls/299.patch
+
+---
+ src/Translator.zig                            | 82 +++++++++++++++----
+ src/ast.zig                                   | 26 ++++++
+ test/cases/run/bitfield_mixed_gap.c           | 14 ++++
+ ...e_function_that_dereferences_opaque_type.c |  2 +-
+ ..._function_that_initializes_opaque_struct.c |  8 +-
+ .../translate/bitfield_named_and_unnamed.c    | 14 ++++
+ .../cases/translate/bitfield_struct_aligned.c | 12 +++
+ test/cases/translate/bitfield_struct_bool.c   | 12 +++
+ .../translate/bitfield_struct_packed_attr.c   | 21 +++++
+ test/cases/translate/bitfield_struct_simple.c | 10 +++
+ .../cases/translate/bitfield_struct_unnamed.c |  9 ++
+ ..._struct_demoted_opaque_due_to_bit_fields.c | 14 ----
+ test/cases/translate/typedef_demoted.c        |  2 +-
+ 13 files changed, 190 insertions(+), 36 deletions(-)
+ create mode 100644 test/cases/run/bitfield_mixed_gap.c
+ create mode 100644 test/cases/translate/bitfield_named_and_unnamed.c
+ create mode 100644 test/cases/translate/bitfield_struct_aligned.c
+ create mode 100644 test/cases/translate/bitfield_struct_bool.c
+ create mode 100644 test/cases/translate/bitfield_struct_packed_attr.c
+ create mode 100644 test/cases/translate/bitfield_struct_simple.c
+ create mode 100644 test/cases/translate/bitfield_struct_unnamed.c
+ delete mode 100644 test/cases/translate/pointer_to_struct_demoted_opaque_due_to_bit_fields.c
+
+diff --git src/Translator.zig src/Translator.zig
+index 0f5fa74..5baa008 100644
+--- src/Translator.zig
++++ src/Translator.zig
+@@ -617,14 +617,28 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+
+         const head_field_alignment = t.headFieldAlignment(record_ty);
+         var unnamed_field_count: u32 = 0;
+-        for (record_ty.fields, 0..) |field, field_index| {
+-            const field_loc = field.name_tok;
+
+-            // Demote record to opaque if it contains a bitfield
+-            if (field.bit_width != .null) {
+-                try t.opaque_demotes.put(t.gpa, base.qt, {});
+-                try t.warn(scope, field_loc, "{s} demoted to opaque type - has bitfield", .{container_kind_name});
+-                break :init ZigTag.opaque_literal.init();
++        var has_bitfields = false;
++        var padding_field_count: u32 = 0;
++        var prev_end_bits: u64 = 0;
++        for (record_ty.fields, 0..) |field, field_index| {
++            const field_offset_bits = field.layout.offset_bits;
++            // Unnamed bitfields are skipped
++            if (field_offset_bits == std.math.maxInt(u64)) {
++                has_bitfields = true;
++                continue;
++            }
++            if (has_bitfields and
++                field_offset_bits > prev_end_bits)
++            {
++                const gap_bits = field_offset_bits - prev_end_bits;
++                try fields.append(t.gpa, .{
++                    .name = try std.fmt.allocPrint(t.arena, "_padding_{d}", .{padding_field_count}),
++                    .type = try t.createUnsignedIntTypeNode(gap_bits),
++                    .default_value = if (t.default_init and container_kind == .@"struct") ZigTag.zero_literal.init() else null,
++                    .alignment = null,
++                });
++                padding_field_count += 1;
+             }
+
+             var field_name = field.name.lookup(t.comp);
+@@ -638,13 +652,18 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+             }
+
+             const field_type = field_type: {
++                if (field.bit_width.unpack()) |width| {
++                    has_bitfields = true;
++                    break :field_type try t.createBitfieldTypeNode(field.qt, width);
++                }
++
+                 // Check if this is a flexible array member.
+                 flexible: {
+                     if (field_index != record_ty.fields.len - 1 and container_kind != .@"union") break :flexible;
+                     const array_ty = field.qt.get(t.comp, .array) orelse break :flexible;
+                     if (!t.isFlexibleArrayLen(array_ty.len)) break :flexible;
+
+-                    const elem_type = t.transType(scope, array_ty.elem, field_loc) catch |err| switch (err) {
++                    const elem_type = t.transType(scope, array_ty.elem, field.name_tok) catch |err| switch (err) {
+                         error.UnsupportedType => break :flexible,
+                         else => |e| return e,
+                     };
+@@ -663,7 +682,7 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+                     break :field_type backing_array;
+                 }
+
+-                break :field_type t.transType(scope, field.qt, field_loc) catch |err| switch (err) {
++                break :field_type t.transType(scope, field.qt, field.name_tok) catch |err| switch (err) {
+                     error.UnsupportedType => {
+                         try t.opaque_demotes.put(t.gpa, base.qt, {});
+                         try t.warn(scope, field.name_tok, "{s} demoted to opaque type - unable to translate type of field {s}", .{
+@@ -679,10 +698,11 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+             // Demote record to opaque if it contains an opaque field
+             if (t.typeWasDemotedToOpaque(field.qt)) {
+                 try t.opaque_demotes.put(t.gpa, base.qt, {});
+-                try t.warn(scope, field_loc, "{s} demoted to opaque type - has opaque field", .{container_kind_name});
++                try t.warn(scope, field.name_tok, "{s} demoted to opaque type - has opaque field", .{container_kind_name});
+                 break :init ZigTag.opaque_literal.init();
+             }
+
++
+             // C99 introduced designated initializers for structs. Omitted fields are implicitly
+             // initialized to zero. Some C APIs are designed with this in mind. Defaulting to zero
+             // values for translated struct fields permits Zig code to comfortably use such an API.
+@@ -691,12 +711,36 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+             else
+                 null;
+
++            const field_alignment = if (has_bitfields)
++                null
++            else
++                t.alignmentForField(record_ty, head_field_alignment, field_index);
++
+             fields.appendAssumeCapacity(.{
+                 .name = field_name,
+                 .type = field_type,
+-                .alignment = t.alignmentForField(record_ty, head_field_alignment, field_index),
++                .alignment = field_alignment,
+                 .default_value = default_value,
+             });
++            prev_end_bits = field_offset_bits + field.layout.size_bits;
++        }
++        if (has_bitfields) {
++            if (container_kind != .@"struct") {
++                try t.opaque_demotes.put(t.gpa, base.qt, {});
++                try t.warn(scope, 0, "{s} demoted to opaque type - bitfields only supported in structs", .{container_kind_name});
++                break :init ZigTag.opaque_literal.init();
++            }
++
++            const layout = record_ty.layout.?;
++            if (layout.size_bits > prev_end_bits) {
++                try fields.append(t.gpa, .{
++                    .name = try std.fmt.allocPrint(t.arena, "_padding_{d}", .{padding_field_count}),
++                    .type = try t.createUnsignedIntTypeNode(layout.size_bits - prev_end_bits),
++                    .default_value = if (t.default_init and container_kind == .@"struct") ZigTag.zero_literal.init() else null,
++                    .alignment = null,
++                });
++                padding_field_count += 1;
++            }
+         }
+
+         // A record is empty if it has no fields or only flexible array fields.
+@@ -722,7 +766,8 @@ fn transRecordDecl(t: *Translator, scope: *Scope, record_qt: QualType) Error!voi
+         container_payload.* = .{
+             .base = .{ .tag = container_kind },
+             .data = .{
+-                .layout = .@"extern",
++                .layout = if (has_bitfields) .@"packed" else .@"extern",
++                .backing_int = if (has_bitfields) record_ty.layout.?.size_bits else null,
+                 .fields = try t.arena.dupe(ast.Payload.Container.Field, fields.items),
+                 .decls = try t.arena.dupe(ZigNode, functions.items),
+             },
+@@ -1169,6 +1214,15 @@ fn getTypeStr(t: *Translator, qt: QualType) ![]const u8 {
+     return t.arena.dupe(u8, allocating.written());
+ }
+
++fn createUnsignedIntTypeNode(t: *Translator, bits: u64) !ZigNode {
++    return ZigTag.type.create(t.arena, try std.fmt.allocPrint(t.arena, "u{d}", .{bits}));
++}
++
++fn createBitfieldTypeNode(t: *Translator, field_qt: QualType, width_bits: u64) !ZigNode {
++    if (width_bits == 1 and field_qt.is(t.comp, .bool)) return ZigTag.type.create(t.arena, "bool");
++    return t.createUnsignedIntTypeNode(width_bits);
++}
++
+ fn transType(t: *Translator, scope: *Scope, qt: QualType, source_loc: TokenIndex) TypeError!ZigNode {
+     switch (qt.type(t.comp)) {
+         .atomic => {
+@@ -1340,10 +1394,8 @@ fn alignmentForField(t: *Translator, record_decl: aro.Type.Record, head_field_al
+     const parent_ptr_alignment_bits = record_decl.layout.?.pointer_alignment_bits;
+     const parent_ptr_alignment = parent_ptr_alignment_bits / bits_per_byte;
+
+-    // bitfields aren't supported yet. Until support is added, records with bitfields
+-    // should be demoted to opaque, and this function shouldn't be called for them.
+     if (field.bit_width != .null) {
+-        @panic("TODO: add bitfield support for records");
++        @panic("This function shouldn't be called for structs with bitfields in them.");
+     }
+
+     const field_offset_bits: u64 = field.layout.offset_bits;
+diff --git src/ast.zig src/ast.zig
+index 6dfb963..79cdfc2 100644
+--- src/ast.zig
++++ src/ast.zig
+@@ -653,6 +653,7 @@ pub const Payload = struct {
+         base: Payload,
+         data: struct {
+             layout: enum { @"packed", @"extern", none },
++            backing_int: ?u64 = null,
+             fields: []Field,
+             decls: []Node,
+         },
+@@ -2227,6 +2228,17 @@ fn renderContainer(c: *Context, node: Node) !NodeIndex {
+     else
+         unreachable;
+
++    const backing_int_expr = if (payload.backing_int) |backing_int| blk: {
++        _ = try c.addToken(.l_paren, "(");
++        const arg_expr = try c.addNode(.{
++            .tag = .identifier,
++            .main_token = try c.addTokenFmt(.identifier, "u{d}", .{backing_int}),
++            .data = undefined,
++        });
++        _ = try c.addToken(.r_paren, ")");
++        break :blk arg_expr;
++    } else null;
++
+     _ = try c.addToken(.l_brace, "{");
+
+     const num_decls = payload.decls.len;
+@@ -2300,6 +2312,20 @@ fn renderContainer(c: *Context, node: Node) !NodeIndex {
+     };
+     _ = try c.addToken(.r_brace, "}");
+
++    if (backing_int_expr) |rendered_backing_int| {
++        const span = try c.listToSpan(members);
++        return c.addNode(.{
++            .tag = if (trailing) .container_decl_arg_trailing else .container_decl_arg,
++            .main_token = kind_tok,
++            .data = .{ .node_and_extra = .{
++                rendered_backing_int,
++                try c.addExtra(std.zig.Ast.Node.SubRange{
++                    .start = span.start,
++                    .end = span.end,
++                }),
++            } },
++        });
++    }
+     if (total_members == 0) {
+         return c.addNode(.{
+             .tag = .container_decl_two,
+diff --git test/cases/run/bitfield_mixed_gap.c test/cases/run/bitfield_mixed_gap.c
+new file mode 100644
+index 0000000..18a71b7
+--- /dev/null
++++ test/cases/run/bitfield_mixed_gap.c
+@@ -0,0 +1,14 @@
++struct MixedGap {
++    unsigned a: 3;
++    unsigned b: 4;
++    int c;
++};
++
++// translate
++//
++// pub const struct_MixedGap = packed struct(u64) {
++//     a: u3,
++//     b: u4,
++//     _padding_0: u25,
++//     c: c_int,
++// };
+diff --git test/cases/translate/Demote_function_that_dereferences_opaque_type.c test/cases/translate/Demote_function_that_dereferences_opaque_type.c
+index d3d3ecd..1a00740 100644
+--- test/cases/translate/Demote_function_that_dereferences_opaque_type.c
++++ test/cases/translate/Demote_function_that_dereferences_opaque_type.c
+@@ -1,5 +1,5 @@
+ struct my_struct {
+-    unsigned a: 1;
++    _Atomic int a;
+ };
+ void deref(struct my_struct *s) {
+     *s;
+diff --git test/cases/translate/Demote_function_that_initializes_opaque_struct.c test/cases/translate/Demote_function_that_initializes_opaque_struct.c
+index 4b73043..5b7b2ef 100644
+--- test/cases/translate/Demote_function_that_initializes_opaque_struct.c
++++ test/cases/translate/Demote_function_that_initializes_opaque_struct.c
+@@ -1,15 +1,13 @@
+ struct my_struct {
+-    unsigned a: 15;
+-    unsigned: 2;
+-    unsigned b: 15;
++    _Atomic int a;
+ };
+ void initialize(void) {
+-    struct my_struct S = {.a = 1, .b = 2};
++    struct my_struct S = {0};
+ }
+
+ // translate
+ //
+-// warning: struct demoted to opaque type - has bitfield
++// warning: struct demoted to opaque type - unable to translate type of field a
+ // pub const struct_my_struct = opaque {};
+ // pub export fn initialize() void {
+ //     const S = if (true) @compileError("local variable has opaque type");
+diff --git test/cases/translate/bitfield_named_and_unnamed.c test/cases/translate/bitfield_named_and_unnamed.c
+new file mode 100644
+index 0000000..3685571
+--- /dev/null
++++ test/cases/translate/bitfield_named_and_unnamed.c
+@@ -0,0 +1,14 @@
++struct Bits {
++    unsigned a: 5;
++    unsigned : 3;
++    unsigned b: 8;
++};
++
++// translate
++//
++// pub const struct_Bits = packed struct(u32) {
++//     a: u5,
++//     _padding_0: u3,
++//     b: u8,
++//     _padding_1: u16,
++// };
+diff --git test/cases/translate/bitfield_struct_aligned.c test/cases/translate/bitfield_struct_aligned.c
+new file mode 100644
+index 0000000..88357eb
+--- /dev/null
++++ test/cases/translate/bitfield_struct_aligned.c
+@@ -0,0 +1,12 @@
++struct AlignedBits {
++    unsigned a: 3;
++    unsigned b: 5;
++} __attribute__((aligned(8)));
++
++// translate
++//
++// pub const struct_AlignedBits = packed struct(u64) {
++//     a: u3,
++//     b: u5,
++//     _padding_0: u56,
++// };
+diff --git test/cases/translate/bitfield_struct_bool.c test/cases/translate/bitfield_struct_bool.c
+new file mode 100644
+index 0000000..4a70917
+--- /dev/null
++++ test/cases/translate/bitfield_struct_bool.c
+@@ -0,0 +1,12 @@
++struct Bits {
++    _Bool a: 1;
++    unsigned b: 3;
++};
++
++// translate
++//
++// pub const struct_Bits = packed struct(u32) {
++//     a: bool,
++//     b: u3,
++//     _padding_0: u28,
++// };
+diff --git test/cases/translate/bitfield_struct_packed_attr.c test/cases/translate/bitfield_struct_packed_attr.c
+new file mode 100644
+index 0000000..981f9a2
+--- /dev/null
++++ test/cases/translate/bitfield_struct_packed_attr.c
+@@ -0,0 +1,21 @@
++struct PackedBits {
++  unsigned a : 1;
++  unsigned b : 7;
++} __attribute__((packed));
++
++struct UnpackedBits {
++  unsigned a : 1;
++  unsigned b : 7;
++};
++
++// translate
++//
++// pub const struct_PackedBits = packed struct(u8) {
++//     a: u1,
++//     b: u7,
++// };
++// pub const struct_UnpackedBits = packed struct(u32) {
++//     a: u1,
++//     b: u7,
++//     _padding_0: u24,
++// };
+diff --git test/cases/translate/bitfield_struct_simple.c test/cases/translate/bitfield_struct_simple.c
+new file mode 100644
+index 0000000..4309522
+--- /dev/null
++++ test/cases/translate/bitfield_struct_simple.c
+@@ -0,0 +1,10 @@
++struct Bits {
++    unsigned a: 2;
++};
++
++// translate
++//
++// pub const struct_Bits = packed struct(u32) {
++//     a: u2,
++//     _padding_0: u30,
++// };
+diff --git test/cases/translate/bitfield_struct_unnamed.c test/cases/translate/bitfield_struct_unnamed.c
+new file mode 100644
+index 0000000..8e75f18
+--- /dev/null
++++ test/cases/translate/bitfield_struct_unnamed.c
+@@ -0,0 +1,9 @@
++struct Bits {
++    unsigned : 2;
++};
++
++// translate
++//
++// pub const struct_Bits = packed struct(u8) {
++//     _padding_0: u8,
++// };
+diff --git test/cases/translate/typedef_demoted.c test/cases/translate/typedef_demoted.c
+index 7085f4c..5df4eb7 100644
+--- test/cases/translate/typedef_demoted.c
++++ test/cases/translate/typedef_demoted.c
+@@ -1,5 +1,5 @@
+ typedef struct {
+-    int a : 2;
++    _Atomic int a;
+ } Foo;
+
+ int foo(Foo foo) {

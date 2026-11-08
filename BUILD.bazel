@@ -1,0 +1,37 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_c_library", "zig_test")
+load("defs.bzl", "import_python_headers")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+PYTHON_VERSIONS = import_python_headers([
+    "3_14",
+    "3_15",
+])
+
+cc_library(
+    name = "cee",
+    hdrs = ["src/c.h"],
+)
+
+zig_c_library(
+    name = "c",
+    cdeps = [":cee"],
+)
+
+zig_binary(
+    name = "ctenosaur",
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":c",
+    ] + PYTHON_VERSIONS,
+)
+
+zig_test(
+    name = "tests",
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/main.zig",
+    deps = [
+        ":c",
+    ] + PYTHON_VERSIONS,
+)

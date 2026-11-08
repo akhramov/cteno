@@ -1,0 +1,6 @@
+load(":zig_fmt.bzl", "zig_fmt")
+
+zig_fmt(
+    name = "zig-fmt",
+    visibility = ["//visibility:public"],
+)
