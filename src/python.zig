@@ -42,48 +42,69 @@ fn doRun(interpreter: anytype, address: usize, process_memory: *ProcessMemory) !
     const interpr_address = try process_memory.reader.peekInt(u64, .native);
     std.debug.assert(interpr_address > 0);
 
-    // Safety: races on a running process.
-    var frame = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "main", "current_frame" });
+    var thread = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "head" });
     while (true) {
-        if (frame.previous == null) {
+        std.log.info("Thread {}, holds gil {}", .{ thread.id, thread.holds_gil });
+
+        // Safety: races on a running process.
+        var frame = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "head", "current_frame" });
+
+        while (true) {
+            try collectFrameData(interpreter, frame, process_memory);
+
+            frame = try process_memory.digMemory(frame, .{"previous"});
+
+            if (frame.previous == null) {
+                break;
+            }
+        }
+
+        if (thread.next == null) {
             break;
         }
 
-        if (frame.owner != interpreter.FRAME_OWNED_BY_INTERPRETER) {
-            const co = try process_memory.digMemory(frame, .{
-                "f_executable", "bits", interpreter.PyCodeObject,
-            });
+        thread = try process_memory.digMemory(thread, .{"next"});
+    }
+}
 
-            const code_ptr = try process_memory.digMemory(frame, .{ "f_executable", "bits", interpreter.PyCodeObject, .{ "co_code_adaptive", *const u8 } });
+fn collectFrameData(interpreter: anytype, frame: interpreter._PyInterpreterFrame, process_memory: *ProcessMemory) !void {
+    if (frame.owner != interpreter.FRAME_OWNED_BY_INTERPRETER) {
+        const co = try process_memory.digMemory(frame, .{
+            "f_executable", "bits", interpreter.PyCodeObject,
+        });
 
-            const instruction_pointer: *const u8 = @ptrCast(frame.instr_ptr);
+        const code_ptr = try process_memory.digMemory(frame, .{ "f_executable", "bits", interpreter.PyCodeObject, .{ "co_code_adaptive", *const u8 } });
 
-            const linetable_size = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, "ob_base", "ob_size" });
+        const instruction_pointer: *const u8 = @ptrCast(frame.instr_ptr);
 
-            const linetable = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, .{ "ob_sval", *const u8 } });
+        const linetable_size = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, "ob_base", "ob_size" });
 
-            process_memory.seekTo(linetable);
-            const linetable_val = try process_memory.reader.peek(@intCast(linetable_size + 1));
+        const linetable = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, .{ "ob_sval", *const u8 } });
 
-            std.debug.assert(linetable_val[linetable_val.len - 1] == 0);
+        process_memory.seekTo(linetable);
+        const linetable_val = try process_memory.reader.peek(@intCast(linetable_size + 1));
 
-            var table = LinetableInfo.init(linetable_val, co.co_firstlineno);
+        std.debug.assert(linetable_val[linetable_val.len - 1] == 0);
 
-            const addrq = (instruction_pointer - code_ptr) / 2;
+        var table = LinetableInfo.init(linetable_val, co.co_firstlineno);
 
-            const line_number = blk: while (try table.next(interpreter)) |res| {
-                if (res.addr <= addrq and res.end_addr >= addrq) {
-                    break :blk res;
-                }
-            } else unreachable;
+        const addrq = (instruction_pointer - code_ptr) >> 1;
 
-            _ = try process_memory.digMemory(co, .{.{ "co_filename", interpreter.PyASCIIObject }});
+        const line_number = blk: while (try table.next(interpreter)) |res| {
+            if (res.addr <= addrq and res.end_addr >= addrq) {
+                break :blk res;
+            }
+        } else unreachable;
 
-            const name = try process_memory.reader.takeDelimiter(0) orelse "";
+        _ = try process_memory.digMemory(co, .{.{ "co_qualname", interpreter.PyASCIIObject }});
+        const qualname = try process_memory.reader.takeDelimiter(0) orelse "";
 
-            std.log.info("{s}:{any}", .{ name, line_number.line });
-        }
-        frame = try process_memory.digMemory(frame, .{"previous"});
+        std.log.info("function {s} located at:", .{qualname});
+
+        _ = try process_memory.digMemory(co, .{.{ "co_filename", interpreter.PyASCIIObject }});
+        const filename = try process_memory.reader.takeDelimiter(0) orelse "";
+
+        std.log.info("{s}:{any}", .{ filename, line_number.line });
     }
 }
 

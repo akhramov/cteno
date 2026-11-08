@@ -18,7 +18,7 @@ zig_c_library(
 )
 
 zig_binary(
-    name = "ctenosaur",
+    name = "cteno",
     srcs = glob(["src/**/*.zig"]),
     main = "src/main.zig",
     visibility = ["//visibility:public"],
