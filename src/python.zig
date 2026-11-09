@@ -47,7 +47,7 @@ fn doRun(interpreter: anytype, address: usize, process_memory: *ProcessMemory) !
         std.log.info("Thread {}, holds gil {}", .{ thread.id, thread.holds_gil });
 
         // Safety: races on a running process.
-        var frame = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "head", "current_frame" });
+        var frame = try process_memory.digMemory(thread, .{ "current_frame" });
 
         while (true) {
             try collectFrameData(interpreter, frame, process_memory);
