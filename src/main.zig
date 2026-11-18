@@ -24,6 +24,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("./traces_aggregator.zig");
+
     std.testing.refAllDecls(@This());
 }
 
@@ -34,5 +36,7 @@ fn run(io: std.Io, pid: i32, allocator: Allocator) !void {
     var process_memory = try ProcessMemory.init(pid, allocator);
 
     const lookup = SymbolLookup.init(&process_memory, &proc_maps, allocator);
-    try Python.run(&process_memory, lookup);
+    const python = try Python.init(&process_memory, lookup);
+
+    try python.run();
 }

@@ -9,6 +9,8 @@ const SymbolLookup = @import("./symbol_lookup.zig");
 const ProcessMemory = @import("./process_memory.zig");
 const ProcMaps = @import("./procmaps.zig");
 
+const Self = @This();
+
 const DebugOffsetsHeader = extern struct {
     cookie: [8]u8,
     version: u64,
@@ -18,7 +20,11 @@ const Error = error{
     NotPython,
 };
 
-pub fn run(process_memory: *ProcessMemory, symbol_lookup: SymbolLookup) !void {
+version: u64,
+interpr_address: usize,
+process_memory: *ProcessMemory,
+
+pub fn init(process_memory: *ProcessMemory, symbol_lookup: SymbolLookup) !Self {
     const address = try symbol_lookup.run("_PyRuntime") orelse return Error.NotPython;
 
     process_memory.seekTo(address);
@@ -29,22 +35,49 @@ pub fn run(process_memory: *ProcessMemory, symbol_lookup: SymbolLookup) !void {
         return Error.NotPython;
     }
 
-    _ = switch (header.version >> 16) {
-        python_3_15.PY_VERSION_HEX >> 16 => try doRun(python_3_15, address, process_memory),
-        python_3_14.PY_VERSION_HEX >> 16 => try doRun(python_3_14, address, process_memory),
+    const interpreter_address = try dispatch(.{ .version = header.version, .address = address, .process_memory = process_memory }, struct {
+        fn f(interpreter: anytype, ctx: anytype) anyerror!usize {
+            return getInterpreterAddress(interpreter, ctx.address, ctx.process_memory);
+        }
+    }.f);
+
+    return .{
+        .interpr_address = interpreter_address,
+        .process_memory = process_memory,
+        .version = header.version,
+    };
+}
+
+pub fn run(self: Self) !void {
+    try dispatch(.{ .version = self.version, .self = self }, struct {
+        fn f(interpreter: anytype, ctx: anytype) anyerror!void {
+            return doRun(interpreter, ctx.self.interpr_address, ctx.self.process_memory);
+        }
+    }.f);
+}
+
+fn getInterpreterAddress(interpreter: anytype, debug_offests_address: usize, process_memory: *ProcessMemory) !usize {
+    const offsets = try process_memory.reader.takeStruct(interpreter.struct__Py_DebugOffsets, .native);
+    process_memory.seekTo(debug_offests_address + offsets.runtime_state.interpreters_head);
+    const interpr_address = try process_memory.reader.peekInt(u64, .native); // OBS. pointer width assumption.
+    std.debug.assert(interpr_address > 0);
+
+    return interpr_address;
+}
+
+// we have vtables at home
+fn dispatch(ctx: anytype, f: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    return switch (ctx.version >> 16) {
+        python_3_15.PY_VERSION_HEX >> 16 => try f(python_3_15, ctx),
+        python_3_14.PY_VERSION_HEX >> 16 => try f(python_3_14, ctx),
         else => return Error.NotPython,
     };
 }
 
-fn doRun(interpreter: anytype, address: usize, process_memory: *ProcessMemory) !void {
-    const offsets = try process_memory.reader.takeStruct(interpreter.struct__Py_DebugOffsets, .native);
-    process_memory.seekTo(address + offsets.runtime_state.interpreters_head);
-    const interpr_address = try process_memory.reader.peekInt(u64, .native);
-    std.debug.assert(interpr_address > 0);
-
+fn doRun(interpreter: anytype, interpr_address: usize, process_memory: *ProcessMemory) !void {
     var thread = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "head" });
     while (true) {
-        std.log.info("Thread {}, holds gil {}", .{ thread.id, thread.holds_gil });
+        std.log.info("Thread {}, holds gil {}", .{ thread.native_thread_id, thread.holds_gil });
 
         // Safety: races on a running process.
         var frame = try process_memory.digMemory(thread, .{"current_frame"});
