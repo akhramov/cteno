@@ -8,6 +8,7 @@ const python_3_14 = @import("3_14");
 const SymbolLookup = @import("./symbol_lookup.zig");
 const ProcessMemory = @import("./process_memory.zig");
 const ProcMaps = @import("./procmaps.zig");
+const TracesAggregator = @import("./traces_aggregator.zig");
 
 const Self = @This();
 
@@ -20,11 +21,13 @@ const Error = error{
     NotPython,
 };
 
+allocator: Allocator,
 version: u64,
 interpr_address: usize,
 process_memory: *ProcessMemory,
+traces_aggregator: *TracesAggregator,
 
-pub fn init(process_memory: *ProcessMemory, symbol_lookup: SymbolLookup) !Self {
+pub fn init(allocator: Allocator, process_memory: *ProcessMemory, symbol_lookup: SymbolLookup, traces_aggregator: *TracesAggregator) !Self {
     const address = try symbol_lookup.run("_PyRuntime") orelse return Error.NotPython;
 
     process_memory.seekTo(address);
@@ -42,16 +45,18 @@ pub fn init(process_memory: *ProcessMemory, symbol_lookup: SymbolLookup) !Self {
     }.f);
 
     return .{
+        .allocator = allocator,
         .interpr_address = interpreter_address,
         .process_memory = process_memory,
         .version = header.version,
+        .traces_aggregator = traces_aggregator,
     };
 }
 
-pub fn run(self: Self) !void {
+pub fn run(self: *Self) !void {
     try dispatch(.{ .version = self.version, .self = self }, struct {
         fn f(interpreter: anytype, ctx: anytype) anyerror!void {
-            return doRun(interpreter, ctx.self.interpr_address, ctx.self.process_memory);
+            return ctx.self.doRun(interpreter);
         }
     }.f);
 }
@@ -74,48 +79,49 @@ fn dispatch(ctx: anytype, f: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? 
     };
 }
 
-fn doRun(interpreter: anytype, interpr_address: usize, process_memory: *ProcessMemory) !void {
-    var thread = try process_memory.digMemory(interpr_address, .{ interpreter.PyInterpreterState, "threads", "head" });
+fn doRun(self: *Self, interpreter: anytype) !void {
+    var thread = try self.process_memory.digMemory(self.interpr_address, .{ interpreter.PyInterpreterState, "threads", "head" });
     while (true) {
         std.log.info("Thread {}, holds gil {}", .{ thread.native_thread_id, thread.holds_gil });
 
         // Safety: races on a running process.
-        var frame = try process_memory.digMemory(thread, .{"current_frame"});
+        var frame = try self.process_memory.digMemory(thread, .{"current_frame"});
 
         while (true) {
-            try collectFrameData(interpreter, frame, process_memory);
+            try self.collectFrameData(interpreter, frame);
 
-            frame = try process_memory.digMemory(frame, .{"previous"});
+            frame = try self.process_memory.digMemory(frame, .{"previous"});
 
             if (frame.previous == null) {
                 break;
             }
         }
 
+        try self.traces_aggregator.finalizeTrace(thread.native_thread_id);
         if (thread.next == null) {
             break;
         }
 
-        thread = try process_memory.digMemory(thread, .{"next"});
+        thread = try self.process_memory.digMemory(thread, .{"next"});
     }
 }
 
-fn collectFrameData(interpreter: anytype, frame: interpreter._PyInterpreterFrame, process_memory: *ProcessMemory) !void {
+fn collectFrameData(self: *Self, interpreter: anytype, frame: interpreter._PyInterpreterFrame) !void {
     if (frame.owner != interpreter.FRAME_OWNED_BY_INTERPRETER) {
-        const co = try process_memory.digMemory(frame, .{
+        const co = try self.process_memory.digMemory(frame, .{
             "f_executable", "bits", interpreter.PyCodeObject,
         });
 
-        const code_ptr = try process_memory.digMemory(frame, .{ "f_executable", "bits", interpreter.PyCodeObject, .{ "co_code_adaptive", *const u8 } });
+        const code_ptr = try self.process_memory.digMemory(frame, .{ "f_executable", "bits", interpreter.PyCodeObject, .{ "co_code_adaptive", *const u8 } });
 
         const instruction_pointer: *const u8 = @ptrCast(frame.instr_ptr);
 
-        const linetable_size = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, "ob_base", "ob_size" });
+        const linetable_size = try self.process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, "ob_base", "ob_size" });
 
-        const linetable = try process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, .{ "ob_sval", *const u8 } });
+        const linetable = try self.process_memory.digMemory(co, .{ .{ "co_linetable", interpreter.PyBytesObject }, .{ "ob_sval", *const u8 } });
 
-        process_memory.seekTo(linetable);
-        const linetable_val = try process_memory.reader.peek(@intCast(linetable_size + 1));
+        self.process_memory.seekTo(linetable);
+        const linetable_val = try self.process_memory.reader.peek(@intCast(linetable_size + 1));
 
         std.debug.assert(linetable_val[linetable_val.len - 1] == 0);
 
@@ -123,21 +129,30 @@ fn collectFrameData(interpreter: anytype, frame: interpreter._PyInterpreterFrame
 
         const addrq = (instruction_pointer - code_ptr) >> 1;
 
-        const line_number = blk: while (try table.next(interpreter)) |res| {
+        const location = blk: while (try table.next(interpreter)) |res| {
             if (res.addr <= addrq and res.end_addr >= addrq) {
                 break :blk res;
             }
         } else unreachable;
 
-        _ = try process_memory.digMemory(co, .{.{ "co_qualname", interpreter.PyASCIIObject }});
-        const qualname = try process_memory.reader.takeDelimiter(0) orelse "";
+        _ = try self.process_memory.digMemory(co, .{.{ "co_qualname", interpreter.PyASCIIObject }});
+        const qualname =
+            try self.allocator.dupe(u8, try self.process_memory.reader.takeDelimiter(0) orelse "");
+        defer self.allocator.free(qualname);
 
         std.log.info("function {s} located at:", .{qualname});
 
-        _ = try process_memory.digMemory(co, .{.{ "co_filename", interpreter.PyASCIIObject }});
-        const filename = try process_memory.reader.takeDelimiter(0) orelse "";
+        // In contrary to qualname, filename does not need to be duped, because
+        // nothing overwrites the reader's buffer at this point.
+        _ = try self.process_memory.digMemory(co, .{.{ "co_filename", interpreter.PyASCIIObject }});
+        const filename = try self.process_memory.reader.takeDelimiter(0) orelse "";
 
-        std.log.info("{s}:{any}", .{ filename, line_number.line });
+        std.log.info("{s}:{any}", .{ filename, location.line });
+        try self.traces_aggregator.pushFrame(.{
+            .name = qualname,
+            .filename = filename,
+            .line = location.line,
+        });
     }
 }
 
