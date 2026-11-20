@@ -32,7 +32,7 @@ fn run(init: std.process.Init, pid: i32, allocator: Allocator) !void {
     var proc_maps = try ProcMaps.init(init.io, pid, allocator);
     defer proc_maps.deinit();
 
-    var traces_aggregator = TracesAggregator.init(allocator);
+    var traces_aggregator = try TracesAggregator.init(allocator);
     defer traces_aggregator.deinit();
 
     var process_memory = try ProcessMemory.init(pid, allocator);
@@ -49,6 +49,6 @@ fn run(init: std.process.Init, pid: i32, allocator: Allocator) !void {
     const stderr = init.preopens.get("stderr").?.file;
     var writer = stderr.writer(init.io, buffer);
 
-    try traces_aggregator.dump(&writer.interface);
+    try traces_aggregator.dumpAsCollapsed(&writer.interface);
     try writer.flush();
 }
