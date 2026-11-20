@@ -5,6 +5,7 @@ const Writer = std.Io.Writer;
 
 const MemoryReader = @This();
 
+allocator: Allocator,
 base: [*]const u8 = undefined,
 pid: std.c.pid_t,
 reader: Reader,
@@ -15,6 +16,7 @@ const vtable: Reader.VTable = .{ .stream = stream };
 pub fn init(pid: std.c.pid_t, allocator: Allocator) !MemoryReader {
     const buffer = try allocator.alloc(u8, 1024);
     return .{
+        .allocator = allocator,
         .pid = pid,
         .seek = 0,
         .reader = .{
@@ -24,6 +26,10 @@ pub fn init(pid: std.c.pid_t, allocator: Allocator) !MemoryReader {
             .end = 0,
         },
     };
+}
+
+pub fn deinit(self: *MemoryReader) void {
+    self.allocator.free(self.reader.buffer);
 }
 
 pub fn digMemory(self: anytype, item: anytype, args: anytype) @TypeOf(digInner(self, @TypeOf(item), item, args, 0)) {

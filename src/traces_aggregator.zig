@@ -18,7 +18,7 @@ pub fn init(allocator: Allocator) Self {
     };
 }
 
-fn pushFrame(self: *Self, frame: anytype) !void {
+pub fn pushFrame(self: *Self, frame: anytype) !void {
     const new = try self.allocator.print("{s};{s} ({s}:{d})", .{ self.accumulator orelse "", frame.name, frame.filename, frame.line });
 
     if (self.accumulator) |acc| {
@@ -29,7 +29,7 @@ fn pushFrame(self: *Self, frame: anytype) !void {
 }
 
 /// Tag holds the traces root
-fn finalizeTrace(self: *Self, thread: i32) !void {
+pub fn finalizeTrace(self: *Self, thread: u64) !void {
     const key = try self.allocator.print("thread {d}{s}", .{ thread, self.accumulator.? });
     const entry = try self.traces.getOrPut(key);
     if (!entry.found_existing) {
@@ -45,7 +45,7 @@ fn finalizeTrace(self: *Self, thread: i32) !void {
     self.accumulator = null;
 }
 
-fn deinit(self: *Self) void {
+pub fn deinit(self: *Self) void {
     if (self.accumulator) |acc| {
         self.allocator.free(acc);
     }

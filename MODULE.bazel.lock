@@ -572,7 +572,7 @@
     },
     "@@rules_multitool+//multitool:extension.bzl%multitool": {
       "general": {
-        "bzlTransitiveDigest": "SvQskkND68+yMLzGcvxo4bIgnY7cG4KpOuIJ6QHhpVQ=",
+        "bzlTransitiveDigest": "EwnPEJpg0IFFd2USmPd3IFOcpAfuEBKDQT0Uocv9iiI=",
         "usagesDigest": "SrPW/7S5cPCFU/aBTjncJPBVfspfbKrn+DTtv5DBo1Q=",
         "recordedInputs": [
           "REPO_MAPPING:bazel_features+,bazel_features_globals bazel_features++version_extension+bazel_features_globals",
