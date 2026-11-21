@@ -82,8 +82,6 @@ fn dispatch(ctx: anytype, f: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? 
 fn doRun(self: *Self, interpreter: anytype) !void {
     var thread = try self.process_memory.digMemory(self.interpr_address, .{ interpreter.PyInterpreterState, "threads", "head" });
     while (true) {
-        std.log.info("Thread {}, holds gil {}", .{ thread.native_thread_id, thread.holds_gil });
-
         // Safety: races on a running process.
         var frame = try self.process_memory.digMemory(thread, .{"current_frame"});
 
@@ -97,7 +95,11 @@ fn doRun(self: *Self, interpreter: anytype) !void {
             }
         }
 
-        try self.traces_aggregator.finalizeTrace(thread.native_thread_id);
+        try self.traces_aggregator.finalizeTrace(thread.native_thread_id, .{
+            .python = .{
+                .holds_gil = thread.holds_gil == 1,
+            },
+        });
         if (thread.next == null) {
             break;
         }
@@ -140,14 +142,11 @@ fn collectFrameData(self: *Self, interpreter: anytype, frame: interpreter._PyInt
             try self.allocator.dupe(u8, try self.process_memory.reader.takeDelimiter(0) orelse "");
         defer self.allocator.free(qualname);
 
-        std.log.info("function {s} located at:", .{qualname});
-
         // In contrary to qualname, filename does not need to be duped, because
         // nothing overwrites the reader's buffer at this point.
         _ = try self.process_memory.digMemory(co, .{.{ "co_filename", interpreter.PyASCIIObject }});
         const filename = try self.process_memory.reader.takeDelimiter(0) orelse "";
 
-        std.log.info("{s}:{any}", .{ filename, location.line });
         try self.traces_aggregator.pushFrame(.{
             .name = qualname,
             .filename = filename,

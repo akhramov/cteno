@@ -18,6 +18,19 @@ const Frame = struct {
 const Trace = struct {
     thread: u64,
     frames: std.ArrayList(Frame),
+    context: union(enum) {
+        python: struct {
+            holds_gil: bool,
+        },
+        empty,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            switch (self) {
+                .python => |python_ctx| try writer.print(", holds gil {}", .{python_ctx.holds_gil}),
+                .empty => {},
+            }
+        }
+    },
 };
 
 const TraceContext = struct {
@@ -75,10 +88,11 @@ pub fn pushFrame(self: *Self, frame: Frame) !void {
 }
 
 /// Tag holds the traces root
-pub fn finalizeTrace(self: *Self, thread: u64) !void {
+pub fn finalizeTrace(self: *Self, thread: u64, context: @FieldType(Trace, "context")) !void {
     const key = Trace{
         .thread = thread,
         .frames = self.accumulator,
+        .context = context,
     };
     const entry = try self.traces.getOrPut(key);
     if (!entry.found_existing) {
@@ -127,6 +141,21 @@ pub fn dumpAsCollapsed(self: Self, writer: *Writer) !void {
     }
 }
 
+pub fn dumpToLogInfo(self: Self) !void {
+    var iter = self.traces.iterator();
+
+    while (iter.next()) |item| {
+        const key = item.key_ptr.*;
+
+        std.log.info("Thread {}{f}", .{ key.thread, key.context });
+
+        for (key.frames.items, 1..) |frame, i| {
+            const epilog = if (i == key.frames.items.len) "\n" else "";
+            std.log.info("function {s} located at:\n{s}:{}{s}", .{ frame.name, frame.filename, frame.line, epilog });
+        }
+    }
+}
+
 test init {
     const allocator = std.testing.allocator;
     var aggregator = try init(allocator);
@@ -135,7 +164,7 @@ test init {
     for (0..4) |_| {
         try aggregator.pushFrame(.{ .name = "function_name", .filename = "/path/to/filename", .line = 42 });
         try aggregator.pushFrame(.{ .name = "parent_name", .filename = "/path/to/parent", .line = 67 });
-        try aggregator.finalizeTrace(1);
+        try aggregator.finalizeTrace(1, .empty);
     }
 
     var buffer: [1024]u8 = undefined;
