@@ -49,6 +49,7 @@ fn run(init: std.process.Init, pid: i32, allocator: Allocator) !void {
     const stderr = init.preopens.get("stderr").?.file;
     var writer = stderr.writer(init.io, buffer);
 
+    try traces_aggregator.dumpToLogInfo();
     try traces_aggregator.dumpAsCollapsed(&writer.interface);
     try writer.flush();
 }
