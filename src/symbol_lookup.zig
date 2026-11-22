@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-const GnuHashSection64 = std.DynLib.ElfDynLib.GnuHashSection64;
+const GnuHashSection64 = std.DynLib.ElfDynLib.GnuHasShection64;
 const elf = std.elf;
 
 const c = @import("c");
@@ -45,8 +45,8 @@ pub fn run(self: @This(), symbol: []const u8) !?usize {
 }
 
 const ElfSymtab = struct {
-    // symbols count
-    count: usize,
+    // gnu hash
+    hash: GnuHash,
     // offset of strtab dynamic tag
     strtab_offset: [*]u8,
     // offset of symtab dynamic tag
@@ -55,7 +55,7 @@ const ElfSymtab = struct {
     fn init(process_memory: anytype, allocator: Allocator) !?@This() {
         var maybe_offset: ?*const u8 = null;
         var maybe_strtab_offset: ?[*]u8 = null;
-        var maybe_count: ?usize = null;
+        var maybe_hash: ?GnuHash = null;
 
         while (elf.takeDynamicSection(&process_memory.reader, true, .native)) |section| {
             switch (section.d_tag) {
@@ -70,19 +70,16 @@ const ElfSymtab = struct {
                     const position = process_memory.currentOffset();
 
                     process_memory.seekTo(@as(*const u8, @ptrFromInt(section.d_val)));
-                    const hash = try GnuHash.init(&process_memory.reader, allocator);
-                    defer hash.deinit();
-
-                    maybe_count = hash.symbolsCount();
+                    maybe_hash = try GnuHash.init(&process_memory.reader, allocator);
 
                     process_memory.seekTo(position);
                 },
                 else => continue,
             }
 
-            if (maybe_offset) |offset| if (maybe_strtab_offset) |strtab_offset| if (maybe_count) |count| {
+            if (maybe_offset) |offset| if (maybe_strtab_offset) |strtab_offset| if (maybe_hash) |hash| {
                 return .{
-                    .count = count,
+                    .hash = hash,
                     .strtab_offset = strtab_offset,
                     .offset = offset,
                 };
@@ -91,15 +88,26 @@ const ElfSymtab = struct {
 
         return null;
     }
+
+    fn deinit(self: @This()) void {
+        self.hash.deinit();
+    }
 };
 
 fn walkSymtab(process_memory: anytype, symbol: []const u8, allocator: Allocator) !?usize {
     const symtab = try ElfSymtab.init(process_memory, allocator) orelse return null;
+    defer symtab.deinit();
     process_memory.seekTo(symtab.offset);
+
+    if (!symtab.hash.maybePresent(symbol)) {
+        return null;
+    }
+
+    const count = symtab.hash.symbolsCount();
 
     var i: usize = 0;
 
-    while (i < symtab.count) : (i += 1) {
+    while (i < count) : (i += 1) {
         const entry = try process_memory.reader.takeStruct(elf.Elf64.Sym, .native);
 
         const position = process_memory.currentOffset();
@@ -188,6 +196,22 @@ const GnuHash = struct {
         };
     }
 
+    fn maybePresent(self: GnuHash, symbol: []const u8) bool {
+        // a good read: https://flapenguin.me/elf-dt-gnu-hash
+        // partially adapted from https://codeberg.org/ziglang/zig/src/commit/2ff397f75cfe81eb07be5e0ffed921e8a162ffbc/lib/std/dynamic_library.zig#L462 MIT License
+        const hash = elf.gnu_hash.calculate(symbol);
+        const index = (hash / 64) % self.header.bloom_size;
+        const bloom_val = self.bloom[index];
+
+        const bit_index_0 = hash % 64;
+        const bit_index_1 = (hash >> @intCast(self.header.bloom_shift)) % 64;
+
+        const one: usize = 1;
+        const bit_mask: usize = (one << @intCast(bit_index_0)) | (one << @intCast(bit_index_1));
+
+        return bloom_val & bit_mask == bit_mask;
+    }
+
     fn deinit(self: *const GnuHash) void {
         self.allocator.free(self.buckets);
         self.allocator.free(self.chains);
@@ -239,8 +263,6 @@ test walkSymtab {
 
     try writer.writeInt(u64, std.math.maxInt(u64), .native); // bloom, all ones, 100% positive.
     try writer.writeInt(u32, 0, .native); // chain index
-    // if we actually want to use the bloom filter we would need
-    // to compute the hash properly
     try writer.writeStruct(elf.gnu_hash.ChainEntry{
         .hash = 1,
         .end_of_chain = true,
